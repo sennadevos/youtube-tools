@@ -10,7 +10,7 @@ import os
 # Add the current directory to Python path so we can import youtube_tools
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from youtube_tools.cli import main
+from youtube_tools.cli.main import main
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

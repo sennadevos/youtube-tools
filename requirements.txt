@@ -1,4 +1,5 @@
 youtube-transcript-api
 pytube
+yt-dlp
 openai
 PyGObject
