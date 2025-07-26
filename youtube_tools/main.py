@@ -1,12 +1,18 @@
-import json
-from .video_chat_backend_json import VideoChatBackendJSON
+"""
+YouTube Tools Main Entry Point
+Provides both CLI and GUI interfaces.
+"""
+
+import sys
+from .gui import main as gui_main
+from .cli import main as cli_main
+
 
 def main():
-    from .gui import YouTubeToolsGUI
-    import gi
-    gi.require_version('Gtk', '3.0')
-    from gi.repository import Gtk
-    win = YouTubeToolsGUI()
-    win.connect("destroy", Gtk.main_quit)
-    win.show_all()
-    Gtk.main()
+    """Main entry point - launches GUI by default, CLI if args provided"""
+    if len(sys.argv) > 1:
+        # Command line arguments provided, use CLI
+        cli_main()
+    else:
+        # No arguments, launch GUI
+        gui_main()

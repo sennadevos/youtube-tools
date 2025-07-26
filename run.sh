@@ -5,5 +5,12 @@ if [ ! -d "venv" ]; then
     ./setup.sh
 fi
 
-venv/bin/python run.py
+# Check if arguments are provided
+if [ $# -gt 0 ]; then
+    # CLI mode - pass all arguments to the CLI script
+    venv/bin/python youtube-tools-cli "$@"
+else
+    # GUI mode - no arguments
+    venv/bin/python run.py
+fi
 

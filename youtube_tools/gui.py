@@ -1,242 +1,315 @@
+#!/usr/bin/env python3
+"""
+YouTube Tools GTK4 GUI
+Modern GTK4 interface for YouTube video processing tools.
+"""
+
 import gi
-import threading
 import json
+import threading
+from typing import Optional
 
-from .url_utils import shorten_youtube_url
-from .downloader import download_youtube_video
-from .transcript import fetch_youtube_transcript
-from .video_chat_backend_json import VideoChatBackendJSON
+gi.require_version('Gtk', '4.0')
+gi.require_version('Adw', '1')
+from gi.repository import Gtk, Adw, GLib, Gio
 
-gi.require_version('Gtk', '3.0')
-gi.require_version('Gdk', '3.0')
-from gi.repository import Gtk, Gdk
+from .cli import cmd_shorten, cmd_download, cmd_transcript, cmd_summarize, cmd_chat
+from .url_utils import is_youtube_url
 
-class YouTubeToolsGUI(Gtk.Window):
-    def __init__(self):
-        Gtk.Window.__init__(self, title="YouTube Tools")
-        self.set_border_width(10)
-        self.set_default_size(600, 600)
 
-        self.url_entry = Gtk.Entry()
-        self.url_entry.set_placeholder_text("YouTube URL")
-
-        self.mode_combo = Gtk.ComboBoxText()
-        self.mode_combo.append_text("Shorten URL")
-        self.mode_combo.append_text("Download Video")
-        self.mode_combo.append_text("Show Transcript")
-        self.mode_combo.append_text("Summarize & Chat")
-        self.mode_combo.set_active(0)
-        self.mode_combo.connect("changed", self.on_mode_changed)
-
-        self.action_btn = Gtk.Button(label="Go")
-        self.action_btn.connect("clicked", self.on_action)
-
-        # Chat UI for summarize/chat mode
-        # Output for Shorten URL (selectable)
-        self.output_entry = Gtk.Entry()
-        self.output_entry.set_editable(False)
-        self.output_entry.set_visible(False)
-        self.clipboard_btn = Gtk.Button(label="Copy to clipboard")
-        self.clipboard_btn.set_visible(False)
-        self.clipboard_btn.connect("clicked", self.on_copy_clipboard)
-
-        # Chat UI for summarize/chat mode
-        self.chat_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        self.chat_scroller = Gtk.ScrolledWindow()
-        self.chat_scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        self.chat_scroller.set_min_content_height(300)
-        self.chat_scroller.add(self.chat_box)
-        self.chat_scroller.set_visible(False)
-
-        self.chat_entry = Gtk.Entry()
-        self.chat_entry.set_placeholder_text("Ask about the video transcript...")
-        self.chat_entry.set_visible(False)
-        self.chat_btn = Gtk.Button(label="Send")
-        self.chat_btn.connect("clicked", self.on_chat)
-        self.chat_btn.set_visible(False)
-
+class YouTubeToolsWindow(Adw.ApplicationWindow):
+    """Main application window"""
+    
+    def __init__(self, application):
+        super().__init__(application=application)
+        self.set_title("YouTube Tools")
+        self.set_default_size(800, 600)
+        
+        # Current video state for chat functionality
+        self.current_video_url: Optional[str] = None
+        self.chat_backend = None
+        
+        self.setup_ui()
+    
+    def setup_ui(self):
+        """Setup the user interface"""
+        # Header bar - AdwApplicationWindow handles this automatically
+        
+        # Main content box
+        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        main_box.set_margin_top(24)
+        main_box.set_margin_bottom(24)
+        main_box.set_margin_start(24)
+        main_box.set_margin_end(24)
+        
+        # URL input section
+        url_group = Adw.PreferencesGroup()
+        url_group.set_title("YouTube Video")
+        url_group.set_description("Enter a YouTube video URL to get started")
+        
+        self.url_entry = Adw.EntryRow()
+        self.url_entry.set_title("Video URL")
+        self.url_entry.connect("changed", self.on_url_changed)
+        url_group.add(self.url_entry)
+        
+        main_box.append(url_group)
+        
+        # Tool selection
+        tool_group = Adw.PreferencesGroup()
+        tool_group.set_title("Select Tool")
+        
+        self.tool_combo = Adw.ComboRow()
+        self.tool_combo.set_title("Tool")
+        
+        # Create string list for tools
+        string_list = Gtk.StringList()
+        string_list.append("Shorten URL")
+        string_list.append("Download Video")
+        string_list.append("Show Transcript")
+        string_list.append("Summarize & Chat")
+        
+        self.tool_combo.set_model(string_list)
+        self.tool_combo.set_selected(0)
+        self.tool_combo.connect("notify::selected", self.on_tool_changed)
+        
+        tool_group.add(self.tool_combo)
+        main_box.append(tool_group)
+        
+        # Action button
+        self.action_button = Gtk.Button(label="Go")
+        self.action_button.add_css_class("suggested-action")
+        self.action_button.set_sensitive(False)
+        self.action_button.connect("clicked", self.on_action_clicked)
+        main_box.append(self.action_button)
+        
+        # Results area
+        self.results_stack = Gtk.Stack()
+        self.results_stack.set_vexpand(True)
+        
+        # Text output page (for shorten URL, errors)
+        text_scroll = Gtk.ScrolledWindow()
+        text_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        self.text_view = Gtk.TextView()
+        self.text_view.set_editable(False)
+        self.text_view.set_wrap_mode(Gtk.WrapMode.WORD)
+        text_scroll.set_child(self.text_view)
+        self.results_stack.add_named(text_scroll, "text")
+        
+        # Chat interface page
+        chat_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        
+        # Chat history
+        chat_scroll = Gtk.ScrolledWindow()
+        chat_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        chat_scroll.set_vexpand(True)
+        
+        self.chat_listbox = Gtk.ListBox()
+        self.chat_listbox.add_css_class("boxed-list")
+        chat_scroll.set_child(self.chat_listbox)
+        chat_box.append(chat_scroll)
+        
+        # Chat input
         chat_input_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        chat_input_box.pack_start(self.chat_entry, True, True, 0)
-        chat_input_box.pack_start(self.chat_btn, False, False, 0)
-        chat_input_box.set_visible(False)
-        self.chat_input_box = chat_input_box
-
-        # Transcript view
-        self.transcript_view = Gtk.TextView()
-        self.transcript_view.set_wrap_mode(Gtk.WrapMode.WORD)
-        self.transcript_view.set_editable(False)
-        self.transcript_scroller = Gtk.ScrolledWindow()
-        self.transcript_scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        self.transcript_scroller.add(self.transcript_view)
-        self.transcript_scroller.set_visible(False)
-
-        # Hide chat and transcript UI elements on startup
-        self.chat_scroller.set_visible(False)
-        self.chat_input_box.set_visible(False)
-        self.chat_entry.set_visible(False)
-        self.chat_btn.set_visible(False)
-        self.transcript_scroller.set_visible(False)
-
-        self.main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        self.main_box.pack_start(self.url_entry, False, False, 0)
-        self.main_box.pack_start(self.mode_combo, False, False, 0)
-        self.main_box.pack_start(self.action_btn, False, False, 0)
-        self.main_box.pack_start(self.output_entry, False, False, 0)
-        self.main_box.pack_start(self.clipboard_btn, False, False, 0)
-        self.main_box.pack_start(self.chat_scroller, True, True, 0)
-        self.main_box.pack_start(self.chat_input_box, False, False, 0)
-        self.main_box.pack_start(self.transcript_scroller, True, True, 0)
-        self.add(self.main_box)
-
-        self.backend = None
-        self.transcript = None
-        self.chat_history = []
-
-        # Ensure correct initial UI state
-        self.update_ui()
-
-        self.backend = None
-        self.transcript = None
-        self.chat_box.set_halign(Gtk.Align.FILL)  # Ensure chat box fills horizontally
-        self.chat_scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        self.chat_scroller.set_min_content_width(300)  # Set a minimum width for better wrapping
-
-    def add_chat_message(self, text, sender="system"):
-        import html
-        label = Gtk.Label()
-        safe_text = html.escape(text)
-        label.set_line_wrap(True)  # Enable line wrapping
-        if sender == "user":
-            label.set_markup(f'<span foreground="blue"><b>You:</b> {safe_text}</span>')
-        elif sender == "assistant":
-            label.set_markup(f'<span foreground="green"><b>LLM:</b> {safe_text}</span>')
+        self.chat_entry = Gtk.Entry()
+        self.chat_entry.set_placeholder_text("Ask about the video...")
+        self.chat_entry.set_hexpand(True)
+        self.chat_entry.connect("activate", self.on_chat_send)
+        
+        self.chat_send_button = Gtk.Button(label="Send")
+        self.chat_send_button.add_css_class("suggested-action")
+        self.chat_send_button.connect("clicked", self.on_chat_send)
+        
+        chat_input_box.append(self.chat_entry)
+        chat_input_box.append(self.chat_send_button)
+        chat_box.append(chat_input_box)
+        
+        self.results_stack.add_named(chat_box, "chat")
+        
+        # Status page
+        status_page = Adw.StatusPage()
+        status_page.set_title("Ready")
+        status_page.set_description("Enter a YouTube URL and select a tool to get started")
+        status_page.set_icon_name("video-x-generic-symbolic")
+        self.results_stack.add_named(status_page, "status")
+        
+        main_box.append(self.results_stack)
+        
+        # Set initial page
+        self.results_stack.set_visible_child_name("status")
+        
+        self.set_content(main_box)
+    
+    def on_url_changed(self, entry):
+        """Handle URL entry changes"""
+        url = entry.get_text().strip()
+        self.action_button.set_sensitive(bool(url))
+    
+    def on_tool_changed(self, combo, param):
+        """Handle tool selection changes"""
+        selected = combo.get_selected()
+        if selected == 3:  # Summarize & Chat
+            self.results_stack.set_visible_child_name("chat")
         else:
-            label.set_markup(f'<span foreground="gray">{safe_text}</span>')
-        label.set_xalign(0)
-        self.chat_box.pack_start(label, False, False, 0)
-        self.chat_box.show_all()
-        self.chat_history.append((sender, text))
-
-    def set_output(self, text):
-        self.output_entry.set_text(text)
-        self.output_entry.set_visible(True)
-        self.clipboard_btn.set_visible(True)
-        self.chat_box.foreach(lambda widget: self.chat_box.remove(widget))
-        self.chat_scroller.set_visible(False)
-        self.chat_input_box.set_visible(False)
-        self.chat_entry.set_visible(False)
-        self.chat_btn.set_visible(False)
-        self.chat_history = []
-    def set_transcript(self, text):
-        buffer = self.transcript_view.get_buffer()
-        buffer.set_text(text)
-        self.transcript_scroller.set_visible(True)
-
-    def update_ui(self):
-        mode = self.mode_combo.get_active_text()
-        if mode == "Shorten URL":
-            self.output_entry.set_visible(False)
-            self.clipboard_btn.set_visible(False)
-            self.chat_scroller.set_visible(False)
-            self.chat_input_box.set_visible(False)
-            self.chat_entry.set_visible(False)
-            self.chat_btn.set_visible(False)
-            self.transcript_scroller.set_visible(False)
-        elif mode == "Summarize & Chat":
-            self.output_entry.set_visible(False)
-            self.clipboard_btn.set_visible(False)
-            self.chat_scroller.set_visible(True)
-            self.chat_input_box.set_visible(True)
-            self.chat_entry.set_visible(True)
-            self.chat_btn.set_visible(True)
-            self.transcript_scroller.set_visible(False)
-        elif mode == "Show Transcript":
-            self.output_entry.set_visible(False)
-            self.clipboard_btn.set_visible(False)
-            self.chat_scroller.set_visible(False)
-            self.chat_input_box.set_visible(False)
-            self.chat_entry.set_visible(False)
-            self.chat_btn.set_visible(False)
-            self.transcript_scroller.set_visible(True)
-        else:
-            self.output_entry.set_visible(False)
-            self.clipboard_btn.set_visible(False)
-            self.chat_scroller.set_visible(False)
-            self.chat_input_box.set_visible(False)
-            self.chat_entry.set_visible(False)
-            self.chat_btn.set_visible(False)
-            self.transcript_scroller.set_visible(False)
-    def on_mode_changed(self, combo):
-        self.update_ui()
-
-    def on_action(self, widget):
-        mode = self.mode_combo.get_active_text()
+            self.results_stack.set_visible_child_name("text")
+    
+    def on_action_clicked(self, button):
+        """Handle main action button click"""
         url = self.url_entry.get_text().strip()
-        if mode == "Shorten URL":
-            short_url = shorten_youtube_url(url)
-            self.output_entry.set_text(short_url)
-            self.output_entry.set_visible(True)
-            self.clipboard_btn.set_visible(True)
-            self.chat_scroller.set_visible(False)
-            self.chat_input_box.set_visible(False)
-            self.chat_entry.set_visible(False)
-            self.chat_btn.set_visible(False)
-        elif mode == "Download Video":
-            def download():
-                try:
-                    download_youtube_video(url)
-                    self.set_output("Download complete.")
-                except Exception as e:
-                    self.set_output(f"Download error: {e}")
-            threading.Thread(target=download).start()
-        elif mode == "Show Transcript":
-            def fetch():
-                try:
-                    transcript = fetch_youtube_transcript(url)
-                    self.transcript = transcript
-                    self.set_transcript(transcript)
-                except Exception as e:
-                    self.set_output(f"Transcript error: {e}")
-            threading.Thread(target=fetch).start()
-        elif mode == "Summarize & Chat":
-            def summarize():
-                try:
-                    self.backend = VideoChatBackendJSON(url)
-                    summary_json = self.backend.get_summary_json()
-                    summary = json.loads(summary_json)["summary"]
-                    self.output_entry.set_visible(False)
-                    self.clipboard_btn.set_visible(False)
-                    self.chat_box.foreach(lambda widget: self.chat_box.remove(widget))
-                    self.chat_scroller.set_visible(True)
-                    self.chat_input_box.set_visible(True)
-                    self.chat_entry.set_visible(True)
-                    self.chat_btn.set_visible(True)
-                    self.add_chat_message(summary, sender="assistant")
-                except Exception as e:
-                    self.set_output(f"Summarize error: {e}")
-            threading.Thread(target=summarize).start()
-    def on_copy_clipboard(self, widget):
-        # Wayland clipboard support using Gtk
-        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-        clipboard.set_text(self.output_entry.get_text(), -1)
-
-    def on_chat(self, widget):
-        question = self.chat_entry.get_text().strip()
-        if not self.backend:
-            self.set_output("Please summarize the video first.")
+        if not url:
             return
-        self.add_chat_message(question, sender="user")
-        def chat():
+        
+        if not is_youtube_url(url):
+            self.show_error("Please enter a valid YouTube URL")
+            return
+        
+        selected_tool = self.tool_combo.get_selected()
+        tool_names = ["Shorten URL", "Download Video", "Show Transcript", "Summarize & Chat"]
+        
+        button.set_sensitive(False)
+        button.set_label("Working...")
+        
+        def run_tool():
             try:
-                answer_json = self.backend.ask_json(question)
-                answer = json.loads(answer_json)["answer"]
-                self.add_chat_message(answer, sender="assistant")
+                if selected_tool == 0:  # Shorten URL
+                    self.handle_shorten(url)
+                elif selected_tool == 1:  # Download Video
+                    self.handle_download(url)
+                elif selected_tool == 2:  # Show Transcript
+                    self.handle_transcript(url)
+                elif selected_tool == 3:  # Summarize & Chat
+                    self.handle_summarize(url)
             except Exception as e:
-                self.add_chat_message(f"Chat error: {e}", sender="system")
-        threading.Thread(target=chat).start()
+                GLib.idle_add(self.show_error, f"Error: {str(e)}")
+            finally:
+                GLib.idle_add(lambda: button.set_sensitive(True))
+                GLib.idle_add(lambda: button.set_label("Go"))
+        
+        thread = threading.Thread(target=run_tool)
+        thread.daemon = True
+        thread.start()
+    
+    def handle_shorten(self, url: str):
+        """Handle URL shortening"""
+        try:
+            from .url_utils import shorten_youtube_url
+            result = shorten_youtube_url(url)
+            GLib.idle_add(self.show_text_result, f"Shortened URL:\n{result}")
+        except Exception as e:
+            GLib.idle_add(self.show_error, str(e))
+    
+    def handle_download(self, url: str):
+        """Handle video download"""
+        try:
+            from .downloader import download_youtube_video
+            download_youtube_video(url)
+            GLib.idle_add(self.show_text_result, "Download completed successfully!")
+        except Exception as e:
+            GLib.idle_add(self.show_error, str(e))
+    
+    def handle_transcript(self, url: str):
+        """Handle transcript fetching"""
+        try:
+            from .transcript import fetch_youtube_transcript
+            transcript = fetch_youtube_transcript(url)
+            if transcript:
+                GLib.idle_add(self.show_text_result, transcript)
+            else:
+                GLib.idle_add(self.show_error, "No transcript available for this video")
+        except Exception as e:
+            GLib.idle_add(self.show_error, str(e))
+    
+    def handle_summarize(self, url: str):
+        """Handle video summarization and setup chat"""
+        try:
+            from .video_chat_backend_json import VideoChatBackendJSON
+            self.chat_backend = VideoChatBackendJSON(url)
+            self.current_video_url = url
+            
+            summary = self.chat_backend.get_summary()
+            GLib.idle_add(self.add_chat_message, "Assistant", summary)
+            GLib.idle_add(self.results_stack.set_visible_child_name, "chat")
+        except Exception as e:
+            GLib.idle_add(self.show_error, str(e))
+    
+    def show_text_result(self, text: str):
+        """Show text result in the text view"""
+        buffer = self.text_view.get_buffer()
+        buffer.set_text(text)
+        self.results_stack.set_visible_child_name("text")
+    
+    def show_error(self, error_msg: str):
+        """Show error message"""
+        buffer = self.text_view.get_buffer()
+        buffer.set_text(f"Error: {error_msg}")
+        self.results_stack.set_visible_child_name("text")
+    
+    def add_chat_message(self, sender: str, message: str):
+        """Add a message to the chat"""
+        row = Adw.ActionRow()
+        
+        if sender == "You":
+            row.set_title(message)
+            row.add_css_class("accent")
+        else:
+            row.set_title(message)
+        
+        row.set_subtitle(sender)
+        self.chat_listbox.append(row)
+        
+        # Auto-scroll to bottom
+        adjustment = self.chat_listbox.get_parent().get_vadjustment()
+        adjustment.set_value(adjustment.get_upper())
+    
+    def on_chat_send(self, widget):
+        """Handle chat message sending"""
+        if not self.chat_backend:
+            return
+        
+        message = self.chat_entry.get_text().strip()
+        if not message:
+            return
+        
+        self.chat_entry.set_text("")
+        self.add_chat_message("You", message)
+        
+        # Disable input while processing
+        self.chat_entry.set_sensitive(False)
+        self.chat_send_button.set_sensitive(False)
+        
+        def get_response():
+            try:
+                response = self.chat_backend.ask(message)
+                GLib.idle_add(self.add_chat_message, "Assistant", response)
+            except Exception as e:
+                GLib.idle_add(self.add_chat_message, "System", f"Error: {str(e)}")
+            finally:
+                GLib.idle_add(lambda: self.chat_entry.set_sensitive(True))
+                GLib.idle_add(lambda: self.chat_send_button.set_sensitive(True))
+        
+        thread = threading.Thread(target=get_response)
+        thread.daemon = True
+        thread.start()
+
+
+class YouTubeToolsApplication(Adw.Application):
+    """Main application class"""
+    
+    def __init__(self):
+        super().__init__(application_id="com.github.sjdevos.youtube-tools")
+        
+    def do_activate(self):
+        """Called when the application is activated"""
+        window = self.props.active_window
+        if not window:
+            window = YouTubeToolsWindow(self)
+        window.present()
+
+
+def main():
+    """Main GUI entry point"""
+    app = YouTubeToolsApplication()
+    return app.run()
+
 
 if __name__ == "__main__":
-    win = YouTubeToolsGUI()
-    win.connect("destroy", Gtk.main_quit)
-    win.show_all()
-    Gtk.main()
+    main()
